@@ -3,6 +3,7 @@ package at.yawk.mcpe.analyzer
 import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.databind.DeserializationContext
 import com.fasterxml.jackson.databind.JsonDeserializer
+import org.apache.commons.lang3.StringEscapeUtils
 import java.io.IOException
 import java.util.ArrayList
 
@@ -29,6 +30,7 @@ interface EsilCommand {
                     val next = take()
                     if (next == until) return result
                     if (next == null) throw IOException("Invalid ESIL: $esil")
+                    if (next.isEmpty()) continue
                     val insn = if (next == "?{") Conditional(takeUntil("}")) else parseSingle(next)
                     result.add(insn)
                 }
@@ -44,16 +46,26 @@ interface EsilCommand {
             }
 
             try {
-                return Value(insn.toInt())
+                return Value(java.lang.Long.decode(insn))
             } catch (e: NumberFormatException) {}
 
-            return Register(insn)
+            if (insn.matches("[a-zA-Z]\\w*".toRegex())) {
+                return Register(insn)
+            }
+
+            if (insn.startsWith("$")) {
+                return Label(insn.substring(1))
+            }
+
+            throw IllegalArgumentException("Invalid instruction: $insn")
         }
     }
 
     data class Register(val name: String) : EsilCommand
 
-    data class Value(val value: Int) : EsilCommand
+    data class Value(val value: Long) : EsilCommand
+
+    data class Label(val name: String) : EsilCommand
 
     data class Conditional(val body: List<EsilCommand>) : EsilCommand
 
@@ -71,7 +83,7 @@ interface EsilCommand {
         ROTATE_LEFT("<<<"),
         ROTATE_RIGHT(">>>"),
         AND("&"),
-        OR("`"),
+        OR("|"),
         XOR("^"),
         ADD("+"),
         SUB("-"),
@@ -87,8 +99,9 @@ interface EsilCommand {
         DIV_REGISTER("/="),
         MOD_REGISTER("%="),
         SHIFT_LEFT_REGISTER("<<="),
+        SHIFT_RIGHT_REGISTER(">>="),
         AND_REGISTER("&="),
-        OR_REGISTER("`="),
+        OR_REGISTER("|="),
         XOR_REGISTER("^="),
         INC_REGISTER("++="),
         DEC_REGISTER("--="),
@@ -107,10 +120,14 @@ interface EsilCommand {
         STORE_MULTI("=[*]"),
         STORE_BYTE("=[1]"),
         STORE_HALF("=[2]"),
-        LOAD("=[]"),
-        LOAD_MULTI("=[*]"),
-        LOAD_BYTE("=[1]"),
-        LOAD_HALF("=[2]"),
+        STORE_INT("=[4]"),
+        STORE_LONG("=[8]"),
+        LOAD("[]"),
+        LOAD_MULTI("[*]"),
+        LOAD_BYTE("[1]"),
+        LOAD_HALF("[2]"),
+        LOAD_INT("[4]"),
+        LOAD_LONG("[8]"),
     }
 
     class Deserializer : JsonDeserializer<List<EsilCommand>>() {

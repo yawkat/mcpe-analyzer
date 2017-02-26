@@ -31,4 +31,10 @@ class EsilCommandTest {
                     EsilCommand.Operation.ASSIGN
             )
     )
+
+    @Test
+    fun `empty`() = Assert.assertEquals(
+            EsilCommand.parse(""),
+            emptyList<String>()
+    )
 }

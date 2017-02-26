@@ -34,7 +34,7 @@ fun main(args: Array<String>) {
         }
     })
     val disassembler = DisassemblerX86(pipe)
-    val packetSignatures = disassembler.collectPacketSignatures()
+    val (packetSignatures, typeSignatures) = disassembler.collectPacketSignatures()
     val packetIds = disassembler.collectPacketIds()
 
     data class Packet(
@@ -55,14 +55,15 @@ fun main(args: Array<String>) {
     ObjectMapper()
             .writerWithDefaultPrettyPrinter()
             .writeValue(System.out, mapOf(
-                    Pair("packets", packets)
+                    Pair("packets", packets),
+                    Pair("types", typeSignatures)
             ))
 }
 
 private class DisassemblerX86(val pipe: R2Pipe) {
     private val symbols: List<R2Pipe.Symbol> by lazy { pipe.listSymbols() }
 
-    fun collectPacketSignatures(): Map<String, String> {
+    fun collectPacketSignatures(): Signatures {
         val ignoredCalls = TreeSet<String>()
 
         fun removeComponents(fancyName: String, component: String): String {
@@ -82,48 +83,72 @@ private class DisassemblerX86(val pipe: R2Pipe) {
         }
 
         fun visitFunction(name: String): RegularExpression<String> {
-            val regex = buildFunctionGraph(pipe)
-            val mapped = regex.map { call ->
-                if (call is Call.Fixed) {
-                    val symbol = symbols.find { it.vaddr == call.address }!!
-                    val demangledName = StringEscapeUtils.unescapeHtml4(symbol.demname)
-                    val matcher = Pattern.compile("BinaryStream::write(.*)").matcher(demangledName)
-                    if (matcher.matches()) {
-                        var fancyName = matcher.group(1).replace("std::__1::", "")
-                        fancyName = removeComponents(fancyName, "allocator")
-                        fancyName = removeComponents(fancyName, "default_delete")
-                        if (fancyName.startsWith("Type<"))
-                            fancyName = fancyName.substring("Type<".length, fancyName.length - 1)
-                        RegularExpression.Terminal(fancyName)
-                    } else when (symbol.demname) {
-                        "Tag::writeNamedTag" -> RegularExpression.Terminal("NamedTag")
-                        "PlayerListEntry::write" -> RegularExpression.Terminal("PlayerListEntry")
-                        "CraftingDataEntry::write" -> RegularExpression.Terminal("CraftingDataEntry")
-                        else -> {
-                            ignoredCalls.add(if (symbol.demname.isEmpty()) symbol.name else symbol.demname)
-                            RegularExpression.empty<String>()
-                        }
-                    }
-                } else {
-                    RegularExpression.Terminal("DYN")
+            fun callToTerminal(call: Call) = if (call is Call.Fixed) {
+                val symbol = symbols.find { it.vaddr == call.address }!!
+                var dname = symbol.demname
+                if (dname.isEmpty()) {
+                    // iD doesn't work because of r2 bug
+                    //dname = pipe.demangle("cxx", symbol.name) // yes, this works sometimes for some reason
+                    //log.trace("Trying harder to demangle ${symbol.name} -> '$dname'")
+                    if (dname.isEmpty()) dname = symbol.name
                 }
+                val matcher = Pattern.compile("BinaryStream::write(.*)").matcher(dname)
+                if (matcher.matches()) {
+                    var fancyName = matcher.group(1).replace("std::__1::", "")
+                    fancyName = removeComponents(fancyName, "allocator")
+                    fancyName = removeComponents(fancyName, "default_delete")
+                    if (fancyName.startsWith("Type<"))
+                        fancyName = fancyName.substring("Type<".length, fancyName.length - 1)
+                    RegularExpression.Terminal(fancyName)
+                } else when (dname) {
+                    "Tag::writeNamedTag" -> RegularExpression.Terminal("NamedTag")
+                    "PlayerListEntry::write" -> RegularExpression.Terminal("PlayerListEntry")
+                    "CraftingDataEntry::write" -> RegularExpression.Terminal("CraftingDataEntry")
+                    "imp._ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKcm" ->
+                        RegularExpression.Terminal("RAW(${call.registerGuesses["rdx"] ?: "?"})")
+                    else -> {
+                        ignoredCalls.add(dname)
+                        RegularExpression.empty<String>()
+                    }
+                }
+            } else {
+                RegularExpression.Terminal("DYN")
             }
+
+            val regex = buildFunctionGraph(pipe, enterCall = { call->
+                callToTerminal(call) == RegularExpression.empty<String>()
+            })
+            val mapped = regex.map(::callToTerminal)
             log.debug("raw $name: $mapped")
             return simplify(mapped)
         }
 
         val packetSignatures = HashMap<String, String>()
+        val typeSignatures = HashMap<String, String>()
 
         for (method in symbols) {
             val packetWriteMatcher = Pattern.compile("(.*)Packet::write").matcher(method.demname)
-            if (!packetWriteMatcher.matches()) continue
-            pipe.seek(method)
-            val name = packetWriteMatcher.group(1)
-            packetSignatures[name] = try {
-                regexToString(visitFunction(name))
-            } catch (e: Throwable) {
-                log.warn("Failure in $name", e)
-                "ERROR"
+            if (packetWriteMatcher.matches()) {
+                pipe.seek(method)
+                val name = packetWriteMatcher.group(1)
+                packetSignatures[name] = try {
+                    regexToString(visitFunction(name))
+                } catch (e: Throwable) {
+                    log.warn("Failure in $name", e)
+                    "ERROR"
+                }
+            }
+
+            val typeWriteMatcher = Pattern.compile("BinaryStream::writeType<(.*)>").matcher(method.demname)
+            if (typeWriteMatcher.matches()) {
+                pipe.seek(method)
+                val name = typeWriteMatcher.group(1)
+                typeSignatures[name] = try {
+                    regexToString(visitFunction(name))
+                } catch (e: Throwable) {
+                    log.warn("Failure in $name", e)
+                    "ERROR"
+                }
             }
         }
 
@@ -131,8 +156,13 @@ private class DisassemblerX86(val pipe: R2Pipe) {
             log.info("Ignoring call symbol $ignoredCall")
         }
 
-        return packetSignatures
+        return Signatures(packetSignatures , typeSignatures)
     }
+
+    data class Signatures(
+            val packetSignatures: Map<String, String>,
+            val typeSignatures: Map<String, String>
+    )
 
     fun collectPacketIds(): Map<String, Int> {
         val packetIds = HashMap<String, Int>()

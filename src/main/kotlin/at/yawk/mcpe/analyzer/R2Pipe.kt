@@ -1,11 +1,15 @@
 package at.yawk.mcpe.analyzer
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.core.JsonFactory
+import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+import org.apache.commons.lang3.StringEscapeUtils
 import org.zeroturnaround.exec.ProcessExecutor
 import org.zeroturnaround.exec.stream.PumpStreamHandler
 import org.zeroturnaround.exec.stream.slf4j.Slf4jStream
+import java.io.ByteArrayInputStream
 import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
@@ -28,9 +32,16 @@ class R2Pipe constructor(
 
     private fun listType(type: Class<*>) = objectMapper.typeFactory.constructCollectionType(List::class.java, type)
     private fun void(cmd: String) = session.cmd(cmd).close()
-    private fun text(cmd: String) = session.cmd(cmd).use { it.reader().readText() }
-    private inline fun <reified R : Any> json(cmd: String): R = objectMapper.readValue(session.cmd(cmd), R::class.java)
-    private inline fun <reified R : Any> jsonList(cmd: String): List<R> = objectMapper.readValue(session.cmd(cmd), listType(R::class.java))
+    private fun text(cmd: String) = session.cmdString(cmd)
+    private inline fun <reified R : Any> json(cmd: String): R =
+            session.cmdJson(objectMapper.factory, cmd).use {
+                objectMapper.readValue(it, R::class.java)
+            }
+
+    private inline fun <reified R : Any> jsonList(cmd: String): List<R> =
+            session.cmdJson(objectMapper.factory, cmd).use {
+                objectMapper.readValue(it, listType(R::class.java))
+            }
 
     ////////////////////
 
@@ -76,12 +87,15 @@ class R2Pipe constructor(
     fun deinitializeVmStack(start: Long, size: Long) = void("aeim- 0x${toHexString(start)} 0x${toHexString(size)}")
     fun initializeVmPcHere() = void("aeip")
     fun vmStepUntil(address: Long) = void("aesu 0x${toHexString(address)}")
-    fun vmGetRegister(register: String) = java.lang.Long.decode(text("aer $register").trim())!!
+    fun vmGetRegister(register: String) = java.lang.Long.decode(text("aer $register").trimEnd('\n', '\r'))!!
     fun enableIoCache() = void("e io.cache=true")
+    fun demangle(language: String, symbol: String) = text("iD $language $symbol").trimEnd('\n', '\r')
 }
 
 interface Session : Closeable {
     fun cmd(cmd: String): InputStream
+    fun cmdString(cmd: String): String = cmd(cmd).use { it.reader().readText() }
+    fun cmdJson(factory: JsonFactory, cmd: String): JsonParser = factory.createParser(cmd(cmd))
 }
 
 class ConsoleSession(path: Path) : Session {
@@ -114,7 +128,13 @@ class ConsoleSession(path: Path) : Session {
 }
 
 class HttpSession(val host: String) : Session {
-    override fun cmd(cmd: String) = URL("$host/cmd/$cmd").openStream()!!
+    override fun cmdString(cmd: String): String {
+        val text = URL("$host/cmd/$cmd").openStream().reader().readText()
+        return StringEscapeUtils.unescapeHtml4(text)
+    }
+
+    override fun cmdJson(factory: JsonFactory, cmd: String) = factory.createParser(cmdString(cmd))!!
+    override fun cmd(cmd: String): InputStream = ByteArrayInputStream(cmdString(cmd).toByteArray())
 
     override fun close() {
     }
