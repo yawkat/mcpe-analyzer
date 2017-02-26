@@ -139,7 +139,7 @@ private class DisassemblerX86(val pipe: R2Pipe) {
                 }
             }
 
-            val typeWriteMatcher = Pattern.compile("BinaryStream::writeType<(.*)>").matcher(method.demname)
+            val typeWriteMatcher = Pattern.compile("BinaryStream::write(.*)").matcher(method.demname)
             if (typeWriteMatcher.matches()) {
                 pipe.seek(method)
                 val name = typeWriteMatcher.group(1)
