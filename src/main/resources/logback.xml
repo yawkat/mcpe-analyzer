@@ -6,6 +6,13 @@
         </encoder>
     </appender>
 
+    <turboFilter class="ch.qos.logback.classic.turbo.MarkerFilter">
+        <Marker>commandLog</Marker>
+        <OnMatch>DENY</OnMatch>
+    </turboFilter>
+
+    <logger name="at.yawk.mcpe.analyzer.EsilInterpreter" level="info"/>
+
     <root level="trace">
         <appender-ref ref="out"/>
     </root>
