@@ -1,6 +1,7 @@
 package at.yawk.mcpe.analyzer
 
 import org.slf4j.LoggerFactory
+import java.io.IOException
 import java.util.ArrayDeque
 import java.util.HashMap
 import java.util.HashSet
@@ -10,8 +11,8 @@ import java.util.HashSet
  */
 private val log = LoggerFactory.getLogger(GraphBuilder::class.java)
 
-fun buildFunctionGraph(pipe: R2Pipe, enterCall: (Call) -> Boolean): RegularExpression<Call> {
-    val node = GraphBuilder(pipe, enterCall).build()
+fun buildFunctionGraph(pipe: R2Pipe, address: Long, enterCall: (Call) -> Boolean): RegularExpression<Call> {
+    val node = GraphBuilder(pipe, enterCall).build(address, EsilState.UNKNOWN)
     val state = nodeToState(node)
     return automatonToRegex(state)
 }
@@ -21,70 +22,124 @@ interface Call {
     object Unknown : Call
 }
 
-private class GraphBuilder(val pipe: R2Pipe, val enterCall: (Call) -> Boolean) {
-    val registry = HashMap<Long, Node>()
+private class GraphBuilder(
+        val pipe: R2Pipe,
+        val enterCall: (Call) -> Boolean,
 
-    tailrec fun build(n: Node = Node(), stateIn: EsilState = EsilState.UNKNOWN): Node {
-        val insn = pipe.disassemble()
-        registry.putIfAbsent(insn.offset, n)?.let { return it }
+        val instructionCache: MutableMap<Long, R2Pipe.Instruction> = HashMap<Long, R2Pipe.Instruction>()
+) {
+    val nodeCache = HashMap<Long, Node>()
+    val visitQueue = ArrayDeque<Node>()
 
-        val state: EsilState = try {
-            interpretEsilInstruction(stateIn, insn.esil)
+    fun childBuilder() = GraphBuilder(pipe, enterCall, instructionCache)
+
+    fun build(startAddress: Long, inState: EsilState): Node {
+        val node = getNodeAt(startAddress, inState)
+        while (true) {
+            val next = visitQueue.poll() ?: break
+            next.inQueue = false
+
+            var tries = 0
+            while (true) {
+                try {
+                    next.result = computeResult(next.address, next.initialState)
+                    break
+                } catch (e: IOException) {
+                    if (tries >= 3) throw e
+                    tries++
+                    log.warn("Generic IOException during graph node computation, retrying... ($tries/3)")
+                }
+            }
+        }
+        return node
+    }
+
+    class Node(
+            val address: Long,
+            var initialState: EsilState
+    ) {
+        var inQueue = false
+        var result: NodeResult? = null
+    }
+
+    data class NodeResult(
+            val linkedCall: Call?,
+            val next: List<Node>
+    )
+
+    private fun getInstructionAt(address: Long) = instructionCache.getOrPut(address) {
+        pipe.seek(address)
+        pipe.disassemble()
+    }
+
+    private fun getNodeAt(address: Long, inState: EsilState): Node {
+        val present = nodeCache[address]
+        if (present != null) {
+            val mergedState = EsilState.intersection(present.initialState, inState)
+            if (mergedState != present.initialState) {
+                // need to revisit this node with less known state
+                present.initialState = mergedState
+                if (!present.inQueue) {
+                    visitQueue.push(present)
+                }
+            }
+            return present
+        } else {
+            val n = Node(address, inState)
+            nodeCache[address] = n
+            visitQueue.push(n)
+            return n
+        }
+    }
+
+    private fun computeResult(address: Long, inState: EsilState): NodeResult {
+        val insn = getInstructionAt(address)
+
+        val stateAfter: EsilState = try {
+            interpretEsilInstruction(inState, insn.esil)
         } catch (e: Exception) {
             log.warn("ESIL evaluation failed", e)
             EsilState.UNKNOWN
         }
 
+        val nextAddress = address + insn.size
+
         when (insn.type) {
             "call", "ucall" -> {
-                n.linkedCall = insn.jump?.let { Call.Fixed(it, state) } ?: Call.Unknown
-                pipe.skip()
-                @Suppress("NON_TAIL_RECURSIVE_CALL")
-                n.next = listOf(build())
-                return n
+                val call = insn.jump?.let { Call.Fixed(it, stateAfter) } ?: Call.Unknown
+                return NodeResult(call, listOf(getNodeAt(nextAddress, stateAfter)))
             }
             "jmp" -> {
-                pipe.seek(insn.jump!!.toLong())
-                if ((pipe.disassemble().flags ?: emptyList<String>()).any { it.startsWith("sym.") }) {
+                val targetAddress = insn.jump!!.toLong()
+                if ((getInstructionAt(targetAddress).flags ?: emptyList<String>()).any { it.startsWith("sym.") }) {
                     // tail call
-                    val call = Call.Fixed(insn.jump.toLong(), state)
+                    val call = Call.Fixed(insn.jump.toLong(), stateAfter)
                     if (!enterCall(call)) {
-                        n.linkedCall = call
-                        return n
+                        return NodeResult(call, emptyList())
                     }
                 }
-                return build(n, state)
+                return NodeResult(null, listOf(getNodeAt(targetAddress, inState)))
             }
             "cjmp" -> {
-                pipe.skip()
-                @Suppress("NON_TAIL_RECURSIVE_CALL")
-                val normal = build()
-                pipe.seek(insn.jump!!.toLong())
-                @Suppress("NON_TAIL_RECURSIVE_CALL")
-                val jump = build()
-                n.next = listOf(normal, jump)
-                return n
+                val normal = getNodeAt(nextAddress, stateAfter)
+                val jump = getNodeAt(insn.jump!!.toLong(), stateAfter)
+                return NodeResult(null, listOf(normal, jump))
             }
             "ccall" -> {
-                pipe.skip()
-                @Suppress("NON_TAIL_RECURSIVE_CALL")
-                val normal = build()
-                val call = Call.Fixed(insn.jump!!.toLong(), state)
-                val jump = if (enterCall(call)) {
-                    @Suppress("NON_TAIL_RECURSIVE_CALL")
-                    val branchStart = build(n)
+                val normal = getNodeAt(nextAddress, stateAfter)
+                val call = Call.Fixed(insn.jump!!.toLong(), stateAfter)
+                if (enterCall(call)) {
+                    val branchStart = childBuilder().build(call.address, stateAfter)
                     branchStart.depthFirstSearch {
-                        if (it.next.isEmpty()) it.next = listOf(normal)
+                        if (it.result!!.next.isEmpty()) it.result = it.result!!.copy(next = listOf(normal))
                     }
-                    branchStart
+                    return NodeResult(null, listOf(normal, branchStart))
                 } else {
-                    Node(linkedCall = call, next = listOf(normal))
+                    return NodeResult(call, listOf(normal))
                 }
-                n.next = listOf(normal, jump)
-                return n
             }
             "ret" -> {
-                return n
+                return NodeResult(null, emptyList())
             }
 
             "rjmp", "ujmp", "mjmp", "ucjmp", "rcall", "icall", "ircall", "uccall",
@@ -92,20 +147,14 @@ private class GraphBuilder(val pipe: R2Pipe, val enterCall: (Call) -> Boolean) {
             -> TODO(insn.type)
 
             else -> {
-                pipe.skip()
-                return build(n, state)
+                return NodeResult(null, listOf(getNodeAt(nextAddress, stateAfter)))
             }
         }
     }
 }
 
-private class Node(
-        var linkedCall: Call? = null,
-        var next: List<Node> = emptyList()
-)
-
-private tailrec fun Node.depthFirstSearch(f: (Node) -> Unit) {
-    val next = next
+private tailrec fun GraphBuilder.Node.depthFirstSearch(f: (GraphBuilder.Node) -> Unit) {
+    val next = result!!.next
     f(this)
     if (!next.isEmpty()) {
         next.forEachIndexed { i, node ->
@@ -120,14 +169,14 @@ private class State<T>(
         val transitions: MutableMap<State<T>, RegularExpression<T>> = HashMap()
 )
 
-private fun nodeToState(n: Node): State<Call> {
-    val map = HashMap<Node, State<Call>>()
+private fun nodeToState(n: GraphBuilder.Node): State<Call> {
+    val map = HashMap<GraphBuilder.Node, State<Call>>()
 
-    fun run(n: Node): State<Call> {
+    fun run(n: GraphBuilder.Node): State<Call> {
         map[n]?.let { return it }
         val origin: State<Call>
         val target: State<Call>
-        val linkedCall = n.linkedCall
+        val linkedCall = n.result!!.linkedCall
         if (linkedCall != null) {
             origin = State()
             target = State()
@@ -137,7 +186,7 @@ private fun nodeToState(n: Node): State<Call> {
             target = origin
         }
         map[n] = origin
-        for (next in n.next) {
+        for (next in n.result!!.next) {
             target.transitions[run(next)] = RegularExpression.Concatenate(emptyList())
         }
         return origin

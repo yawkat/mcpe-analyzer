@@ -1,8 +1,8 @@
 package at.yawk.mcpe.analyzer
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.apache.commons.lang3.StringEscapeUtils
 import org.slf4j.LoggerFactory
+import org.slf4j.MarkerFactory
 import java.io.InputStream
 import java.nio.file.Paths
 import java.util.HashMap
@@ -28,8 +28,10 @@ fun main(args: Array<String>) {
     }
 
     val pipe = R2Pipe(object : Session by session {
+        val TAG = MarkerFactory.getMarker("commandLog")
+
         override fun cmd(cmd: String): InputStream {
-            log.trace("$ $cmd")
+            log.trace(TAG, "$ $cmd")
             return session.cmd(cmd)
         }
     })
@@ -82,7 +84,7 @@ private class DisassemblerX86(val pipe: R2Pipe) {
             return fancyName1
         }
 
-        fun visitFunction(name: String): RegularExpression<String> {
+        fun visitFunction(name: String, address: Long): RegularExpression<String> {
             fun callToTerminal(call: Call) = if (call is Call.Fixed) {
                 val symbol = symbols.find { it.vaddr == call.address }!!
                 var dname = symbol.demname
@@ -117,7 +119,7 @@ private class DisassemblerX86(val pipe: R2Pipe) {
 
             val regex = buildFunctionGraph(pipe, enterCall = { call->
                 callToTerminal(call) == RegularExpression.empty<String>()
-            })
+            }, address = address)
             val mapped = regex.map(::callToTerminal)
             log.debug("raw $name: $mapped")
             return simplify(mapped)
@@ -129,10 +131,9 @@ private class DisassemblerX86(val pipe: R2Pipe) {
         for (method in symbols) {
             val packetWriteMatcher = Pattern.compile("(.*)Packet::write").matcher(method.demname)
             if (packetWriteMatcher.matches()) {
-                pipe.seek(method)
                 val name = packetWriteMatcher.group(1)
                 packetSignatures[name] = try {
-                    regexToString(visitFunction(name))
+                    regexToString(visitFunction(name, method.vaddr))
                 } catch (e: Throwable) {
                     log.warn("Failure in $name", e)
                     "ERROR"
@@ -141,10 +142,9 @@ private class DisassemblerX86(val pipe: R2Pipe) {
 
             val typeWriteMatcher = Pattern.compile("BinaryStream::write(.*)").matcher(method.demname)
             if (typeWriteMatcher.matches()) {
-                pipe.seek(method)
                 val name = typeWriteMatcher.group(1)
                 typeSignatures[name] = try {
-                    regexToString(visitFunction(name))
+                    regexToString(visitFunction(name, method.vaddr))
                 } catch (e: Throwable) {
                     log.warn("Failure in $name", e)
                     "ERROR"
