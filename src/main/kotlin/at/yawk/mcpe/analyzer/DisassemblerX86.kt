@@ -105,7 +105,7 @@ private class DisassemblerX86(val pipe: R2Pipe) {
                     "PlayerListEntry::write" -> RegularExpression.Terminal("PlayerListEntry")
                     "CraftingDataEntry::write" -> RegularExpression.Terminal("CraftingDataEntry")
                     "imp._ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKcm" ->
-                        RegularExpression.Terminal("RAW(${call.registerGuesses["rdx"] ?: "?"})")
+                        RegularExpression.Terminal("RAW(${call.state.registers["rdx"] ?: "?"})")
                     else -> {
                         ignoredCalls.add(dname)
                         RegularExpression.empty<String>()

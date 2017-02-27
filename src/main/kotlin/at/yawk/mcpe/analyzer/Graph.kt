@@ -17,178 +17,27 @@ fun buildFunctionGraph(pipe: R2Pipe, enterCall: (Call) -> Boolean): RegularExpre
 }
 
 interface Call {
-    data class Fixed(val address: Long, val registerGuesses: Map<String, Long>) : Call
+    data class Fixed(val address: Long, val state: EsilState) : Call
     object Unknown : Call
 }
 
 private class GraphBuilder(val pipe: R2Pipe, val enterCall: (Call) -> Boolean) {
     val registry = HashMap<Long, Node>()
 
-    private fun guessRegisters(esil: List<EsilCommand>, registerGuessesIn: Map<String, Long>): Map<String, Long> {
-        var registerGuesses = registerGuessesIn
-
-        val UNKNOWN = Any()
-        val stack = ArrayDeque<Any?>()
-
-        fun eval(cmd: EsilCommand) {
-            log.trace("{} -> {}", cmd, stack)
-
-            when (cmd) {
-                is EsilCommand.Register -> stack.push(cmd)
-                is EsilCommand.Value -> stack.push(cmd.value)
-                is EsilCommand.Label -> stack.push(UNKNOWN)
-                is EsilCommand.Conditional -> {
-                    val before = registerGuesses
-                    cmd.body.forEach(::eval)
-                    val after = registerGuesses
-                    // only keep values that are unchanged in the body
-                    registerGuesses = before.filter { after[it.key] == it.value }
-                }
-                is EsilCommand.Operation -> when (cmd) {
-                    EsilCommand.Operation.TRAP,
-                    EsilCommand.Operation.SYSCALL
-                    -> stack.pop()
-                    EsilCommand.Operation.CURRENT_ADDRESS -> {
-                        stack.push(UNKNOWN)
-                    }
-                    EsilCommand.Operation.COMPARE,
-                    EsilCommand.Operation.LESS_THAN,
-                    EsilCommand.Operation.LESS_THAN_EQUAL,
-                    EsilCommand.Operation.GREATER_THAN,
-                    EsilCommand.Operation.GREATER_THAN_EQUAL,
-                    EsilCommand.Operation.SHIFT_LEFT,
-                    EsilCommand.Operation.SHIFT_RIGHT,
-                    EsilCommand.Operation.ROTATE_LEFT,
-                    EsilCommand.Operation.ROTATE_RIGHT,
-                    EsilCommand.Operation.AND,
-                    EsilCommand.Operation.OR,
-                    EsilCommand.Operation.XOR,
-                    EsilCommand.Operation.ADD,
-                    EsilCommand.Operation.SUB,
-                    EsilCommand.Operation.MUL,
-                    EsilCommand.Operation.DIV,
-                    EsilCommand.Operation.MOD
-                    -> {
-                        stack.pop()
-                        stack.pop()
-                        stack.push(UNKNOWN)
-                    }
-                    EsilCommand.Operation.INC,
-                    EsilCommand.Operation.DEC,
-                    EsilCommand.Operation.NEG
-                    -> {
-                        stack.pop()
-                        stack.push(UNKNOWN)
-                    }
-                    EsilCommand.Operation.ADD_REGISTER,
-                    EsilCommand.Operation.SUB_REGISTER,
-                    EsilCommand.Operation.MUL_REGISTER,
-                    EsilCommand.Operation.DIV_REGISTER,
-                    EsilCommand.Operation.MOD_REGISTER,
-                    EsilCommand.Operation.SHIFT_LEFT_REGISTER,
-                    EsilCommand.Operation.SHIFT_RIGHT_REGISTER,
-                    EsilCommand.Operation.AND_REGISTER,
-                    EsilCommand.Operation.OR_REGISTER,
-                    EsilCommand.Operation.XOR_REGISTER
-                    -> {
-                        val reg = stack.pop() as EsilCommand.Register
-                        stack.pop()
-                        registerGuesses = registerGuesses.filterKeys { it != reg.name }
-                    }
-                    EsilCommand.Operation.INC_REGISTER,
-                    EsilCommand.Operation.DEC_REGISTER,
-                    EsilCommand.Operation.NOT_REGISTER
-                    -> {
-                        val reg = stack.pop() as EsilCommand.Register
-                        registerGuesses = registerGuesses.filterKeys { it != reg.name }
-                    }
-                    EsilCommand.Operation.SWAP -> {
-                        val a = stack.pop()
-                        val b = stack.pop()
-                        stack.push(a)
-                        stack.push(b)
-                    }
-                    EsilCommand.Operation.DUP -> {
-                        stack.push(stack.peekFirst())
-                    }
-                    EsilCommand.Operation.NUM -> {
-                        stack.push(registerGuesses[(stack.pop() as EsilCommand.Register).name])
-                    }
-                    EsilCommand.Operation.ASSIGN -> {
-                        val reg = stack.pop() as EsilCommand.Register
-                        val v = stack.pop()
-                        val value: Long? = when (v) {
-                            is Long -> v
-                            is EsilCommand.Register -> registerGuesses[v.name]
-                            else -> null
-                        }
-                        if (value == null) {
-                            registerGuesses[reg.name]
-                        } else {
-                            registerGuesses += reg.name to value
-                        }
-                    }
-                    EsilCommand.Operation.STORE,
-                    EsilCommand.Operation.STORE_BYTE,
-                    EsilCommand.Operation.STORE_INT,
-                    EsilCommand.Operation.STORE_HALF,
-                    EsilCommand.Operation.STORE_LONG-> {
-                        stack.pop()
-                        stack.pop()
-                    }
-                    EsilCommand.Operation.STORE_MULTI -> {
-                        val n = stack.pop() as Long
-                        for (i in 1..n) {
-                            stack.pop()
-                        }
-                    }
-                    EsilCommand.Operation.LOAD,
-                    EsilCommand.Operation.LOAD_BYTE,
-                    EsilCommand.Operation.LOAD_HALF,
-                    EsilCommand.Operation.LOAD_INT,
-                    EsilCommand.Operation.LOAD_LONG
-                    -> {
-                        stack.pop()
-                        stack.push(UNKNOWN)
-                    }
-                    EsilCommand.Operation.LOAD_MULTI -> {
-                        val n = stack.pop() as Long
-                        for (i in 1..n) {
-                            stack.push(UNKNOWN)
-                        }
-                    }
-                    EsilCommand.Operation.CLEAR -> stack.clear()
-
-                    // not implemented
-                    EsilCommand.Operation.PICK,
-                    EsilCommand.Operation.RPICK,
-                    EsilCommand.Operation.BREAK,
-                    EsilCommand.Operation.TODO
-                    -> {
-                        registerGuesses = emptyMap()
-                    }
-                }
-            }
-        }
-
-        esil.forEach(::eval)
-        return registerGuesses
-    }
-
-    tailrec fun build(n: Node = Node(), registerGuessesIn: Map<String, Long> = emptyMap()): Node {
+    tailrec fun build(n: Node = Node(), stateIn: EsilState = EsilState.UNKNOWN): Node {
         val insn = pipe.disassemble()
         registry.putIfAbsent(insn.offset, n)?.let { return it }
 
-        val registerGuesses: Map<String, Long> = try {
-            guessRegisters(insn.esil, registerGuessesIn)
+        val state: EsilState = try {
+            interpretEsilInstruction(stateIn, insn.esil)
         } catch (e: Exception) {
             log.warn("ESIL evaluation failed", e)
-            emptyMap()
+            EsilState.UNKNOWN
         }
 
         when (insn.type) {
             "call", "ucall" -> {
-                n.linkedCall = insn.jump?.let { Call.Fixed(it, registerGuesses) } ?: Call.Unknown
+                n.linkedCall = insn.jump?.let { Call.Fixed(it, state) } ?: Call.Unknown
                 pipe.skip()
                 @Suppress("NON_TAIL_RECURSIVE_CALL")
                 n.next = listOf(build())
@@ -198,13 +47,13 @@ private class GraphBuilder(val pipe: R2Pipe, val enterCall: (Call) -> Boolean) {
                 pipe.seek(insn.jump!!.toLong())
                 if ((pipe.disassemble().flags ?: emptyList<String>()).any { it.startsWith("sym.") }) {
                     // tail call
-                    val call = Call.Fixed(insn.jump.toLong(), registerGuesses)
+                    val call = Call.Fixed(insn.jump.toLong(), state)
                     if (!enterCall(call)) {
                         n.linkedCall = call
                         return n
                     }
                 }
-                return build(n, registerGuesses)
+                return build(n, state)
             }
             "cjmp" -> {
                 pipe.skip()
@@ -220,7 +69,7 @@ private class GraphBuilder(val pipe: R2Pipe, val enterCall: (Call) -> Boolean) {
                 pipe.skip()
                 @Suppress("NON_TAIL_RECURSIVE_CALL")
                 val normal = build()
-                val call = Call.Fixed(insn.jump!!.toLong(), registerGuesses)
+                val call = Call.Fixed(insn.jump!!.toLong(), state)
                 val jump = if (enterCall(call)) {
                     @Suppress("NON_TAIL_RECURSIVE_CALL")
                     val branchStart = build(n)
@@ -244,7 +93,7 @@ private class GraphBuilder(val pipe: R2Pipe, val enterCall: (Call) -> Boolean) {
 
             else -> {
                 pipe.skip()
-                return build(n, registerGuesses)
+                return build(n, state)
             }
         }
     }
