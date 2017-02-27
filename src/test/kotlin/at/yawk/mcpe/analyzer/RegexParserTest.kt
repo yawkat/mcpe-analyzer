@@ -90,4 +90,10 @@ class RegexParserTest {
             parseRegex("x{2,5}"),
             RegularExpression.Terminal("x").repeat(2, 5)
     )
+
+    @Test
+    fun `exact bound`() = Assert.assertEquals(
+            parseRegex("x{2}"),
+            RegularExpression.Terminal("x").repeat(2, 2)
+    )
 }

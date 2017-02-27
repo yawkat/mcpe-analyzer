@@ -84,12 +84,17 @@ private abstract class RegexParser<out T>(val input: String) {
                     skipWhitespace()
                     val min = take(Char::isDigit).toInt()
                     skipWhitespace()
-                    if (take() != ',') throw ParseException("Expected ',' near index $i")
-                    skipWhitespace()
-                    val maxStr = take(Char::isDigit)
-                    val max = if (maxStr.isEmpty()) null else maxStr.toInt()
-                    skipWhitespace()
-                    if (take() != '}') throw ParseException("Expected ',' near index $i")
+                    val max: Int?
+                    if (peek() == ',') {
+                        take()
+                        skipWhitespace()
+                        val maxStr = take(Char::isDigit)
+                        max = if (maxStr.isEmpty()) null else maxStr.toInt()
+                        skipWhitespace()
+                    } else {
+                        max = min
+                    }
+                    if (take() != '}') throw ParseException("Expected '}' near index $i")
                     concat[concat.size - 1] = concat.last().repeat(min, max)
                 }
                 'ε' -> concat.add(RegularExpression.empty())
