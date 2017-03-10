@@ -12,6 +12,8 @@
     </turboFilter>
 
     <logger name="at.yawk.mcpe.analyzer.EsilInterpreter" level="info"/>
+    <logger name="at.yawk.mcpe.analyzer.RegexSimplifier" level="info"/>
+    <logger name="at.yawk.mcpe.analyzer.GraphBuilder" level="trace"/>
 
     <root level="trace">
         <appender-ref ref="out"/>

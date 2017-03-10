@@ -28,8 +28,7 @@ interface EsilCommand {
                 val result = ArrayList<EsilCommand>()
                 while (true) {
                     val next = take()
-                    if (next == until) return result
-                    if (next == null) throw IOException("Invalid ESIL: $esil")
+                    if (next == null || next == until) return result
                     if (next.isEmpty()) continue
                     val insn = if (next == "?{") Conditional(takeUntil("}")) else parseSingle(next)
                     result.add(insn)
@@ -82,6 +81,7 @@ interface EsilCommand {
         SHIFT_RIGHT(">>"),
         ROTATE_LEFT("<<<"),
         ROTATE_RIGHT(">>>"),
+        ARITHMETIC_SHIFT_RIGHT(">>>>"),
         AND("&"),
         OR("|"),
         XOR("^"),
@@ -122,12 +122,14 @@ interface EsilCommand {
         STORE_HALF("=[2]"),
         STORE_INT("=[4]"),
         STORE_LONG("=[8]"),
+        STORE_LONG_LONG("=[16]"),
         LOAD("[]"),
         LOAD_MULTI("[*]"),
         LOAD_BYTE("[1]"),
         LOAD_HALF("[2]"),
         LOAD_INT("[4]"),
         LOAD_LONG("[8]"),
+        LOAD_LONG_LONG("[16]"),
     }
 
     class Deserializer : JsonDeserializer<List<EsilCommand>>() {

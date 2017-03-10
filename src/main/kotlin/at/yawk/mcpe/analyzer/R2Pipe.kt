@@ -20,6 +20,16 @@ import java.nio.file.Path
 /**
  * @author yawkat
  */
+private fun String.trimEndNewlines(): String {
+    var s = this
+    while (true) {
+        val sizeBefore = s.length
+        s = s.trimEnd('\n', '\r')
+        if (s.endsWith("<br />")) s = s.substring(0, s.length - 6)
+        if (sizeBefore == s.length) return s
+    }
+}
+
 class R2Pipe constructor(
         private val session: Session
 ) : Closeable by session {
@@ -27,7 +37,7 @@ class R2Pipe constructor(
             .findAndRegisterModules()
 
     companion object {
-        fun open(path: Path) = R2Pipe(ConsoleSession(path))
+        fun open(path: Path) = R2Pipe(ConsoleSession(path.toString()))
     }
 
     private fun listType(type: Class<*>) = objectMapper.typeFactory.constructCollectionType(List::class.java, type)
@@ -45,10 +55,41 @@ class R2Pipe constructor(
 
     ////////////////////
 
+    fun at(
+            address: Long? = null,
+            architecture: Architecture? = null
+    ): R2Pipe = R2Pipe(object : Session {
+        fun modulate(cmd: String): String {
+            var c = cmd
+            if (architecture != null) c += " @a:${architecture.id} @b:${architecture.bits}"
+            if (address != null) c += " @ $address"
+            return c
+        }
+
+        override fun cmd(cmd: String): InputStream {
+            return session.cmd(modulate(cmd))
+        }
+
+        override fun cmdJson(factory: JsonFactory, cmd: String): JsonParser {
+            return session.cmdJson(factory, modulate(cmd))
+        }
+
+        override fun cmdString(cmd: String): String {
+            return session.cmdString(modulate(cmd))
+        }
+
+        override fun close() {
+        }
+    })
+
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class Symbol(val name: String, val demname: String, val flagname: String, val size: Int, val vaddr: Long, val paddr: Long)
 
     fun listSymbols() = jsonList<Symbol>("isj")
+
+    data class Relocation(val name: String?, val type: String, val vaddr: Long, val paddr: Long, val is_ifunc: Boolean)
+
+    fun listRelocations() = jsonList<Relocation>("irj")
 
     fun seek(obj: String) = void("s $obj")
     fun seek(address: Long) = void("s 0x${toHexString(address)}")
@@ -59,15 +100,15 @@ class R2Pipe constructor(
     data class Instruction(
             val offset: Long,
             @JsonDeserialize(using = EsilCommand.Deserializer::class)
-            val esil: List<EsilCommand>,
+            val esil: List<EsilCommand>?,
             val refptr: Boolean,
             val fcn_addr: Long,
             val fcn_last: Long,
             val size: Int,
-            val opcode: String,
-            val bytes: String,
-            val family: String,
-            val type: String,
+            val opcode: String?,
+            val bytes: String?,
+            val family: String?,
+            val type: String?,
             val type_num: Long,
             val type2_num: Long,
 
@@ -76,8 +117,13 @@ class R2Pipe constructor(
             val flags: List<String>?
     )
 
-    fun disassemble(n: Int) = jsonList<Instruction>("pdj $n")
-    fun disassemble() = disassemble(1).single()
+    fun disassemble(n: Int, architecture: Architecture? = null) =
+            jsonList<Instruction>("pdj $n ${architecture?.id ?: ""} ${architecture?.bits ?: ""}")
+
+    fun disassemble(architecture: Architecture? = null) =
+            disassemble(1, architecture).single()
+
+    fun bytes(n: Int): ByteArray = json("p8j $n")
 
     fun skip(n: Int = 1) = void("so $n")
 
@@ -87,9 +133,27 @@ class R2Pipe constructor(
     fun deinitializeVmStack(start: Long, size: Long) = void("aeim- 0x${toHexString(start)} 0x${toHexString(size)}")
     fun initializeVmPcHere() = void("aeip")
     fun vmStepUntil(address: Long) = void("aesu 0x${toHexString(address)}")
-    fun vmGetRegister(register: String) = java.lang.Long.decode(text("aer $register").trimEnd('\n', '\r'))!!
+    fun vmGetRegister(register: String) = java.lang.Long.decode(text("aer $register").trimEndNewlines())!!
     fun enableIoCache() = void("e io.cache=true")
-    fun demangle(language: String, symbol: String) = text("iD $language $symbol").trimEnd('\n', '\r')
+    fun demangle(language: String, symbol: String) = text("iD $language $symbol").trimEndNewlines()
+
+    data class FileInfo(
+            val core: Core,
+            val bin: Bin
+    ) {
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        data class Core(
+                val file: String
+        )
+
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        data class Bin(
+                val arch: String,
+                val bits: Int
+        )
+    }
+
+    fun fileInfo(): FileInfo = json("ij")
 }
 
 interface Session : Closeable {
@@ -98,9 +162,9 @@ interface Session : Closeable {
     fun cmdJson(factory: JsonFactory, cmd: String): JsonParser = factory.createParser(cmd(cmd))
 }
 
-class ConsoleSession(path: Path) : Session {
+class ConsoleSession(path: String) : Session {
     val process = ProcessExecutor()
-            .command("r2", "-q0", path.toString())
+            .command("r2", "-q0", path)
             .destroyOnExit()
             .streams(object : PumpStreamHandler(null, Slf4jStream.of(ConsoleSession::class.java).asError()) {
                 // PumpStreamHandler doesn't do what I want...

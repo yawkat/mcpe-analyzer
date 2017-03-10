@@ -1,10 +1,14 @@
 package at.yawk.mcpe.analyzer
 
+import at.yawk.mcpe.analyzer.graph.Call
+import at.yawk.mcpe.analyzer.graph.Position
+import com.fasterxml.jackson.core.JsonFactory
+import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.slf4j.MarkerFactory
+import java.io.Closeable
 import java.io.InputStream
-import java.nio.file.Paths
 import java.util.HashMap
 import java.util.TreeSet
 import java.util.regex.Pattern
@@ -24,20 +28,30 @@ fun main(args: Array<String>) {
     if (args.size != 1) usage()
     val session = when {
         args[0].startsWith("http") -> HttpSession(args[0])
-        else -> ConsoleSession(Paths.get(args[0]))
+        else -> ConsoleSession(args[0])
     }
 
-    val pipe = R2Pipe(object : Session by session {
+    val pipe = R2Pipe(object : Session, Closeable by session {
         val TAG = MarkerFactory.getMarker("commandLog")
 
         override fun cmd(cmd: String): InputStream {
             log.trace(TAG, "$ $cmd")
             return session.cmd(cmd)
         }
+
+        override fun cmdJson(factory: JsonFactory, cmd: String): JsonParser {
+            log.trace(TAG, "$ $cmd")
+            return session.cmdJson(factory, cmd)
+        }
+
+        override fun cmdString(cmd: String): String {
+            log.trace(TAG, "$ $cmd")
+            return session.cmdString(cmd)
+        }
     })
     val disassembler = DisassemblerX86(pipe)
-    val (packetSignatures, typeSignatures) = disassembler.collectPacketSignatures()
-    val packetIds = disassembler.collectPacketIds()
+    val (packetSignatures, typeSignatures) = /*emptyMap<String, String>() to emptyMap<String, String>()  */disassembler.collectPacketSignatures()
+    val packetIds = /*emptyMap<String, Int>()*/disassembler.collectPacketIds()
 
     data class Packet(
             val id: String?, // hex string
@@ -63,7 +77,7 @@ fun main(args: Array<String>) {
 }
 
 private class DisassemblerX86(val pipe: R2Pipe) {
-    private val symbols: List<R2Pipe.Symbol> by lazy { pipe.listSymbols() }
+    private val pipeInfo = PipeInfo(pipe)
 
     fun collectPacketSignatures(): Signatures {
         val ignoredCalls = TreeSet<String>()
@@ -85,8 +99,7 @@ private class DisassemblerX86(val pipe: R2Pipe) {
         }
 
         fun visitFunction(name: String, address: Long): RegularExpression<String> {
-            fun callToTerminal(call: Call) = if (call is Call.Fixed) {
-                val symbol = symbols.find { it.vaddr == call.address }!!
+            fun symbolToTerminal(state: EsilState, symbol: R2Pipe.Symbol): RegularExpression<String>? {
                 var dname = symbol.demname
                 if (dname.isEmpty()) {
                     // iD doesn't work because of r2 bug
@@ -101,26 +114,37 @@ private class DisassemblerX86(val pipe: R2Pipe) {
                     fancyName = removeComponents(fancyName, "default_delete")
                     if (fancyName.startsWith("Type<"))
                         fancyName = fancyName.substring("Type<".length, fancyName.length - 1)
-                    RegularExpression.Terminal(fancyName)
+                    return RegularExpression.Terminal(fancyName)
                 } else when (dname) {
-                    "Tag::writeNamedTag" -> RegularExpression.Terminal("NamedTag")
-                    "PlayerListEntry::write" -> RegularExpression.Terminal("PlayerListEntry")
-                    "CraftingDataEntry::write" -> RegularExpression.Terminal("CraftingDataEntry")
+                    "Tag::writeNamedTag" -> return RegularExpression.Terminal("NamedTag")
+                    "PlayerListEntry::write" -> return RegularExpression.Terminal("PlayerListEntry")
+                    "CraftingDataEntry::write" -> return RegularExpression.Terminal("CraftingDataEntry")
                     "imp._ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEPKcm" ->
-                        RegularExpression.Terminal("RAW(${call.state.registers["rdx"] ?: "?"})")
+                        return RegularExpression.Terminal("RAW(${state.registers["rdx"] ?: "?"})")
                     else -> {
                         ignoredCalls.add(dname)
-                        RegularExpression.empty<String>()
+                        return null
                     }
                 }
-            } else {
-                RegularExpression.Terminal("DYN")
             }
 
-            val regex = buildFunctionGraph(pipe, enterCall = { call->
-                callToTerminal(call) == RegularExpression.empty<String>()
-            }, address = address)
-            val mapped = regex.map(::callToTerminal)
+            fun shouldEnterCall(call: Call.Static): Boolean {
+                if (call.symbol.name.startsWith("imp.")) return false
+                if (call.symbol.name.endsWith("8toStringEv")) return false
+                if (call.symbol.name == "__ZNK12ItemInstance22getStrippedNetworkItemEv") return false
+                return symbolToTerminal(call.state, call.symbol) == null
+            }
+
+            val automaton = at.yawk.mcpe.analyzer.graph.buildFunctionGraph(pipe, pipeInfo, enterCall = ::shouldEnterCall, position = Position(address, pipeInfo.architecture))
+            val regex = automaton.destructiveToRegex()
+            val mapped = regex.map { call ->
+                when (call) {
+                    is at.yawk.mcpe.analyzer.graph.Call.Static ->
+                        symbolToTerminal(call.state, call.symbol) ?: RegularExpression.empty()
+                    is at.yawk.mcpe.analyzer.graph.Call.Dynamic -> RegularExpression.Terminal("DYN")
+                    is at.yawk.mcpe.analyzer.graph.Call.NoReturn -> RegularExpression.nothing()
+                }
+            }
             log.debug("raw $name: $mapped")
             return simplify(mapped)
         }
@@ -128,7 +152,7 @@ private class DisassemblerX86(val pipe: R2Pipe) {
         val packetSignatures = HashMap<String, String>()
         val typeSignatures = HashMap<String, String>()
 
-        for (method in symbols) {
+        for (method in pipeInfo.symbols) {
             val packetWriteMatcher = Pattern.compile("(.*)Packet::write").matcher(method.demname)
             if (packetWriteMatcher.matches()) {
                 val name = packetWriteMatcher.group(1)
@@ -140,7 +164,7 @@ private class DisassemblerX86(val pipe: R2Pipe) {
                 }
             }
 
-            val typeWriteMatcher = Pattern.compile("BinaryStream::write(.*)").matcher(method.demname)
+            val typeWriteMatcher = Pattern.compile("BinaryStream::write(.+)").matcher(method.demname)
             if (typeWriteMatcher.matches()) {
                 val name = typeWriteMatcher.group(1)
                 typeSignatures[name] = try {
@@ -169,10 +193,11 @@ private class DisassemblerX86(val pipe: R2Pipe) {
 
         pipe.enableIoCache()
 
-        for (symbol in symbols) {
+        for (symbol in pipeInfo.symbols) {
             val packetWriteMatcher = Pattern.compile("(.*)Packet::getId").matcher(symbol.demname)
             if (!packetWriteMatcher.matches()) continue
             val name = packetWriteMatcher.group(1)
+            log.debug("Reading packet ID for {}", name)
 
             pipe.seek(symbol)
             pipe.analyzeFunction()
@@ -182,9 +207,9 @@ private class DisassemblerX86(val pipe: R2Pipe) {
             pipe.initializeVmStack(0x2000, 0xffff)
             try {
                 pipe.initializeVmPcHere()
-                pipe.vmStepUntil(end)
+                pipe.at(architecture = pipeInfo.architecture).vmStepUntil(end)
 
-                packetIds[name] = pipe.vmGetRegister("eax").toInt()
+                packetIds[name] = pipe.vmGetRegister(pipeInfo.architecture.returnRegister).toInt()
             } finally {
                 pipe.deinitializeVmStack(0x2000, 0xffff)
                 pipe.deinitializeVmState()
