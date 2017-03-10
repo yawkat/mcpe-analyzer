@@ -1,7 +1,5 @@
 package at.yawk.mcpe.analyzer
 
-import javafx.scene.shape.Arc
-
 /**
  * @author yawkat
  */
