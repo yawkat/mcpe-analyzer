@@ -2,6 +2,8 @@ package at.yawk.mcpe.analyzer
 
 import at.yawk.mcpe.analyzer.graph.Call
 import at.yawk.mcpe.analyzer.graph.Position
+import com.beust.jcommander.JCommander
+import com.beust.jcommander.Parameter
 import com.fasterxml.jackson.core.JsonFactory
 import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -18,17 +20,18 @@ import java.util.regex.Pattern
  */
 private val log = LoggerFactory.getLogger(DisassemblerX86::class.java)
 
-private fun usage(): Nothing {
-    System.err.println("Usage: java -jar <file> <r2 server URL | file>")
-    System.exit(-1)
-    throw AssertionError()
+private class Args {
+    @Parameter(arity = 1)
+    lateinit var file: List<String>
 }
 
-fun main(args: Array<String>) {
-    if (args.size != 1) usage()
+fun main(argsArray: Array<String>) {
+    val args = Args()
+    JCommander(args, *argsArray)
+
     val session = when {
-        args[0].startsWith("http") -> HttpSession(args[0])
-        else -> ConsoleSession(args[0])
+        args.file.single().startsWith("http") -> HttpSession(args.file.single())
+        else -> ConsoleSession(args.file.single())
     }
 
     val pipe = R2Pipe(object : Session, Closeable by session {
