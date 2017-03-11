@@ -148,6 +148,7 @@ private class DisassemblerX86(val args: Args) {
                 if (call.symbol.name.startsWith("imp.")) return false
                 if (call.symbol.name.endsWith("8toStringEv")) return false
                 if (call.symbol.name == "__ZNK12ItemInstance22getStrippedNetworkItemEv") return false
+                if (call.symbol.name == "__ZN12ItemInstanceC1ERKS_") return false
                 return symbolToTerminal(call.state, call.symbol) == null
             }
 
