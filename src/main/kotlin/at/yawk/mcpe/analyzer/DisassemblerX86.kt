@@ -9,6 +9,7 @@ import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.slf4j.MarkerFactory
+import sun.misc.ObjectInputFilter
 import java.io.Closeable
 import java.io.InputStream
 import java.util.HashMap
@@ -21,66 +22,78 @@ import java.util.regex.Pattern
 private val log = LoggerFactory.getLogger(DisassemblerX86::class.java)
 
 private class Args {
-    @Parameter(arity = 1)
+    @Parameter(arity = 1, required = true)
     lateinit var file: List<String>
+
+    @Parameter(names = arrayOf("--only-visit"), arity = 1, required = false)
+    var onlyVisit: String? = null
 }
 
 fun main(argsArray: Array<String>) {
     val args = Args()
     JCommander(args, *argsArray)
 
-    val session = when {
-        args.file.single().startsWith("http") -> HttpSession(args.file.single())
-        else -> ConsoleSession(args.file.single())
-    }
-
-    val pipe = R2Pipe(object : Session, Closeable by session {
-        val TAG = MarkerFactory.getMarker("commandLog")
-
-        override fun cmd(cmd: String): InputStream {
-            log.trace(TAG, "$ $cmd")
-            return session.cmd(cmd)
-        }
-
-        override fun cmdJson(factory: JsonFactory, cmd: String): JsonParser {
-            log.trace(TAG, "$ $cmd")
-            return session.cmdJson(factory, cmd)
-        }
-
-        override fun cmdString(cmd: String): String {
-            log.trace(TAG, "$ $cmd")
-            return session.cmdString(cmd)
-        }
-    })
-    val disassembler = DisassemblerX86(pipe)
-    val (packetSignatures, typeSignatures) = /*emptyMap<String, String>() to emptyMap<String, String>()  */disassembler.collectPacketSignatures()
-    val packetIds = /*emptyMap<String, Int>()*/disassembler.collectPacketIds()
-
-    data class Packet(
-            val id: String?, // hex string
-            val name: String,
-            val signature: String?
-    )
-
-    val packetNames = packetIds.keys + packetSignatures.keys
-    val packets = packetNames.map { name ->
-        Packet(
-                name = name,
-                id = packetIds[name]?.let { id -> String.format("%02x", id) },
-                signature = packetSignatures[name]
-        )
-    }.sortedBy { it.id }
-
-    ObjectMapper()
-            .writerWithDefaultPrettyPrinter()
-            .writeValue(System.out, mapOf(
-                    Pair("packets", packets),
-                    Pair("types", typeSignatures)
-            ))
+    DisassemblerX86(args).run()
 }
 
-private class DisassemblerX86(val pipe: R2Pipe) {
-    private val pipeInfo = PipeInfo(pipe)
+private class DisassemblerX86(val args: Args) {
+    lateinit var pipe: R2Pipe
+
+    val pipeInfo by lazy { PipeInfo(pipe) }
+
+    private fun ignoreMethod(method: String) = args.onlyVisit != null && args.onlyVisit != method
+
+    fun run() {
+        val session = when {
+            args.file.single().startsWith("http") -> HttpSession(args.file.single())
+            else -> ConsoleSession(args.file.single())
+        }
+
+        pipe = R2Pipe(object : Session, Closeable by session {
+            val TAG = MarkerFactory.getMarker("commandLog")
+
+            override fun cmd(cmd: String): InputStream {
+                log.trace(TAG, "$ $cmd")
+                return session.cmd(cmd)
+            }
+
+            override fun cmdJson(factory: JsonFactory, cmd: String): JsonParser {
+                log.trace(TAG, "$ $cmd")
+                return session.cmdJson(factory, cmd)
+            }
+
+            override fun cmdString(cmd: String): String {
+                log.trace(TAG, "$ $cmd")
+                return session.cmdString(cmd)
+            }
+        })
+
+        val (packetSignatures, typeSignatures) = collectPacketSignatures()
+        val packetIds = collectPacketIds()
+
+        data class Packet(
+                val id: String?, // hex string
+                val name: String,
+                val signature: String?
+        )
+
+        val packetNames = packetIds.keys + packetSignatures.keys
+        val packets = packetNames.map { name ->
+            Packet(
+                    name = name,
+                    id = packetIds[name]?.let { id -> String.format("%02x", id) },
+                    signature = packetSignatures[name]
+            )
+        }.sortedBy { it.id }
+
+        ObjectMapper()
+                .writerWithDefaultPrettyPrinter()
+                .writeValue(System.out, mapOf(
+                        Pair("packets", packets),
+                        Pair("types", typeSignatures)
+                ))
+    }
+
 
     fun collectPacketSignatures(): Signatures {
         val ignoredCalls = TreeSet<String>()
@@ -156,6 +169,8 @@ private class DisassemblerX86(val pipe: R2Pipe) {
         val typeSignatures = HashMap<String, String>()
 
         for (method in pipeInfo.symbols) {
+            if (ignoreMethod(method.demname)) continue
+
             val packetWriteMatcher = Pattern.compile("(.*)Packet::write").matcher(method.demname)
             if (packetWriteMatcher.matches()) {
                 val name = packetWriteMatcher.group(1)
@@ -197,6 +212,8 @@ private class DisassemblerX86(val pipe: R2Pipe) {
         pipe.enableIoCache()
 
         for (symbol in pipeInfo.symbols) {
+            if (ignoreMethod(symbol.demname)) continue
+
             val packetWriteMatcher = Pattern.compile("(.*)Packet::getId").matcher(symbol.demname)
             if (!packetWriteMatcher.matches()) continue
             val name = packetWriteMatcher.group(1)
