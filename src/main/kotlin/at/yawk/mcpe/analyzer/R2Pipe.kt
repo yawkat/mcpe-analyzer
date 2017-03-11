@@ -61,7 +61,10 @@ class R2Pipe constructor(
     ): R2Pipe = R2Pipe(object : Session {
         fun modulate(cmd: String): String {
             var c = cmd
-            if (architecture != null) c += " @a:${architecture.id} @b:${architecture.bits}"
+            if (architecture != null) {
+                c += " @a:${architecture.id}"
+                if (architecture.bits != null) " @b:${architecture.bits}"
+            }
             if (address != null) c += " @ $address"
             return c
         }
