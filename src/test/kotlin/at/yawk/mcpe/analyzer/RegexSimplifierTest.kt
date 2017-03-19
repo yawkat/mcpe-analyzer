@@ -111,6 +111,12 @@ class RegexSimplifierTest {
             parseRegex("(x y)+")
     )
 
+    @Test
+    fun `union merge repeats`() = Assert.assertEquals(
+            simplify(parseRegex("x* y | x+ y | x? y | x* y x*")),
+            parseRegex("x* y x*")
+    )
+
     //@Test todo: would be nice if this passed
     fun `union 1`() = Assert.assertEquals(
             simplify((t(1) concat t(2)) or (t(1).repeat(0, 1) concat t(2) concat t(1)) or t(2)),

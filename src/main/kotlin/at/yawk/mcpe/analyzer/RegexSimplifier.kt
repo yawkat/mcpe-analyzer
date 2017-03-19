@@ -252,17 +252,73 @@ private class RegexSimplifier<T> {
             else -> throw AssertionError()
         }
 
+        private fun contains(superset: RegularExpression<T>, subset: RegularExpression<T>): Boolean {
+            if (superset == subset) return true
+            if (subset == RegularExpression.empty<T>() && superset.matchesEpsilon()) return true
+            if (superset is RegularExpression.Concatenate) {
+                val subItems = if (subset is RegularExpression.Concatenate) subset.members else listOf(subset)
+                if (contains(superset.members, subItems)) return true
+            }
+            if (superset is RegularExpression.Repeat) {
+                if (subset == superset.expression && superset.min <= 1) {
+                    return true
+                }
+                if (subset is RegularExpression.Repeat && subset.expression == superset.expression &&
+                        subset.min >= superset.min && (superset.max == null || (subset.max != null && subset.max <= superset.max))) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        private fun contains(superset: List<RegularExpression<T>>, subset: List<RegularExpression<T>>): Boolean = trace({ "$subset ⊂? $superset" }) {
+            if (superset.isEmpty()) {
+                if (subset.isEmpty()) {
+                    trace { "$subset ⊂ $superset" }
+                    return true
+                } else {
+                    trace { "$subset ⊄ $superset" }
+                    return false
+                }
+            }
+            val headL = superset.first()
+            val tailL = superset.subList(1, superset.size)
+
+            if (headL.matchesEpsilon()) {
+                if (contains(tailL, subset)) {
+                    trace { "$subset ⊂ $superset" }
+                    return true
+                }
+            }
+
+            if (subset.isEmpty()) {
+                trace { "$subset ⊄ $superset" }
+                return false
+            }
+
+            val headR = subset.first()
+            val tailR = subset.subList(1, subset.size)
+
+            if (contains(headL, headR) && contains(tailL, tailR)) {
+                trace { "$subset ⊂ $superset" }
+                return true
+            }
+
+            trace { "$subset ⊄ $superset" }
+            return false
+        }
+
         /**
          * Try to merge [left] and [right] into `return` so that [left] | [right] = return and
          * prefix? [left] suffix? | [right] = prefix? `return` suffix?
          */
         private fun tryMergeUnidirectional(left: RegularExpression<T>, right: RegularExpression<T>): RegularExpression<T>? {
             if (left == right) return left
+            if (contains(left, right)) {
+                trace { "Absorbing $right into expression $left without change" }
+                return left
+            }
             if (right == RegularExpression.empty<T>()) {
-                if (left.matchesEpsilon()) {
-                    trace { "Absorbing epsilon into expression $left without change" }
-                    return left
-                }
                 if (left is RegularExpression.Repeat && left.min == 1) {
                     trace { "Absorbing epsilon into expression $left by + -> *" }
                     return left.copy(min = 0)
@@ -303,10 +359,6 @@ private class RegexSimplifier<T> {
                     }
                 }
                 if (right is RegularExpression.Concatenate) {
-                    if (leftNonEmpty.map { it.value } == right.members) {
-                        trace { "${left.members} absorbed ${right.members} because the latter is a strict subset" }
-                        return left
-                    }
                     if (leftNonEmpty.size == right.members.size + 1) {
                         var candidate: IndexedValue<RegularExpression<T>>? = null
                         var possible = true
@@ -333,10 +385,6 @@ private class RegexSimplifier<T> {
                     if (left.min == 2) {
                         trace { "$left <- $right by changing to *" }
                         return left.copy(min = 1)
-                    }
-                    if (left.min <= 1) {
-                        trace { "$left <- $right because it is a strict subset" }
-                        return left
                     }
                 }
 
