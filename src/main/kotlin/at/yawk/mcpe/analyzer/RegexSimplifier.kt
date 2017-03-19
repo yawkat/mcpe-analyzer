@@ -78,24 +78,9 @@ private class RegexSimplifier<T> {
             trace({ insertionString(tail, here) }) {
                 if (tail) {
                     items.add(here)
-                    while (items.size >= 2 && tryMergeIndices(items.size - 2, items.size - 1)) {
-                    }
                 } else {
                     items.add(0, here)
-                    while (items.size >= 2 && tryMergeIndices(0, 1)) {
-                    }
                 }
-            }
-        }
-
-        fun tryMergeIndices(left: Int, right: Int): Boolean {
-            val merged = tryMerge(items[left], items[right])
-            if (merged != null) {
-                items[left] = merged
-                items.removeAt(right)
-                return true
-            } else {
-                return false
             }
         }
 
@@ -126,13 +111,28 @@ private class RegexSimplifier<T> {
             return null
         }
 
-        fun build(): RegularExpression<T> = when (items.size) {
-            0 -> RegularExpression.empty()
-            1 -> {
-                trace { "Unwrap single expression $items" }
-                items.single()
+        fun build(): RegularExpression<T> {
+            var i = 0
+            while (i < items.size - 1) {
+                val left = items[i]
+                val right = items[i+1]
+                val merged = tryMerge(left, right)
+                if (merged == null) {
+                    i++
+                } else {
+                    items[i] = merged
+                    items.removeAt(i + 1)
+                }
             }
-            else -> RegularExpression.Concatenate(items)
+
+            return when (items.size) {
+                0 -> RegularExpression.empty()
+                1 -> {
+                    trace { "Unwrap single expression $items" }
+                    items.single()
+                }
+                else -> RegularExpression.Concatenate(items)
+            }
         }
     }
 
