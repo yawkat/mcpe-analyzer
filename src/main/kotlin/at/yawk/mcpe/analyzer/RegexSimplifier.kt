@@ -113,16 +113,40 @@ private class RegexSimplifier<T> {
 
         fun build(): RegularExpression<T> {
             var i = 0
-            while (i < items.size - 1) {
-                val left = items[i]
-                val right = items[i+1]
-                val merged = tryMerge(left, right)
-                if (merged == null) {
-                    i++
-                } else {
-                    items[i] = merged
-                    items.removeAt(i + 1)
+            while (i < items.size) {
+                val here = items[i]
+                if (i < items.size - 1) {
+                    val right = items[i + 1]
+                    val merged = tryMerge(here, right)
+                    if (merged != null) {
+                        items[i] = merged
+                        items.removeAt(i + 1)
+                        continue
+                    }
                 }
+
+                if (here is RegularExpression.Repeat && here.expression is RegularExpression.Concatenate) {
+                    val hereMembers = here.expression.members
+                    if (i >= hereMembers.size) {
+                        val leftRange = items.subList(i - hereMembers.size, i)
+                        if (hereMembers == leftRange) {
+                            items[i] = here.copy(min = here.min + 1, max = here.max?.plus(1))
+                            leftRange.clear()
+                            i -= hereMembers.size
+                            continue
+                        }
+                    }
+                    if (i + hereMembers.size < items.size) {
+                        val rightRange = items.subList(i + 1, i + hereMembers.size + 1)
+                        if (hereMembers == rightRange) {
+                            items[i] = here.copy(min = here.min + 1, max = here.max?.plus(1))
+                            rightRange.clear()
+                            continue
+                        }
+                    }
+                }
+
+                i++
             }
 
             return when (items.size) {
