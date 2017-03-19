@@ -304,14 +304,27 @@ private class RegexSimplifier<T> {
                     }
                 }
             }
-            if (left is RegularExpression.Repeat && left.expression == right) {
-                if (left.min == 2) {
-                    trace { "$left <- $right by changing to *" }
-                    return left.copy(min = 1)
+            if (left is RegularExpression.Repeat) {
+                if (left.expression == right) {
+                    if (left.min == 2) {
+                        trace { "$left <- $right by changing to *" }
+                        return left.copy(min = 1)
+                    }
+                    if (left.min <= 1) {
+                        trace { "$left <- $right because it is a strict subset" }
+                        return left
+                    }
                 }
-                if (left.min <= 1) {
-                    trace { "$left <- $right because it is a strict subset" }
-                    return left
+
+                if (right is RegularExpression.Repeat && left.expression == right.expression) {
+                    if (left.min <= right.min) {
+                        // x{m,n} | x{n+1,o} -> x{m,o}
+                        if (left.max == null || left.max + 1 >= right.min) {
+                            val max = if (left.max == null || right.max == null) null
+                            else Math.max(left.max, right.max)
+                            return left.copy(max = max)
+                        }
+                    }
                 }
             }
             return null

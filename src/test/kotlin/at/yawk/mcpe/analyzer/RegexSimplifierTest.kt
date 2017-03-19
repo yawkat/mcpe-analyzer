@@ -34,6 +34,12 @@ class RegexSimplifierTest {
     )
 
     @Test
+    fun `union repeat unification`() = Assert.assertEquals(
+            simplify(parseRegex("x? | x+")),
+            parseRegex("x*")
+    )
+
+    @Test
     fun `nested zeroOrMore neutralize`() =Assert.assertEquals(
             simplify(parseRegex("x**")),
             parseRegex("x*")
